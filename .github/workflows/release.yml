@@ -1,0 +1,57 @@
+name: Release firmware
+
+# Релиз создаётся пушем тега вида v1.2.3:
+#   git tag v1.2.3 && git push origin v1.2.3
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [esp32, esp32c3, esp12e]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Set firmware version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          printf '#pragma once\n#define FW_VERSION "%s"\n' "$VERSION" > include/version.h
+          cat include/version.h
+
+      - name: Build
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Rename binary
+        run: cp .pio/build/${{ matrix.env }}/firmware.bin firmware-${{ matrix.env }}.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ matrix.env }}
+          path: firmware-${{ matrix.env }}.bin
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fw-*
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: firmware-*.bin
+          generate_release_notes: true
