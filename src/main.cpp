@@ -717,16 +717,16 @@ void loop()
     delay(5);
 
 
-    // check GH
-    const int ledPin = 2;              // GPIO2 (часто встроенный светодиод на модулях ESP-12)
-    const unsigned long interval = 500; // Интервал переключения в миллисекундах (500 мс = 0.5 сек)
-    static unsigned long previousMillis = 0;   // Время последнего переключения
-    static bool ledState = false;              // Текущее состояние светодиода
-    unsigned long currentMillis = millis();
-    if (currentMillis - previousMillis >= interval)
-    {
-        previousMillis = currentMillis;
-        ledState = !ledState;
-        digitalWrite(ledPin, ledState ? HIGH : LOW);
-    }
+    // // check GH
+    // const int ledPin = 2;              // GPIO2 (часто встроенный светодиод на модулях ESP-12)
+    // const unsigned long interval = 500; // Интервал переключения в миллисекундах (500 мс = 0.5 сек)
+    // static unsigned long previousMillis = 0;   // Время последнего переключения
+    // static bool ledState = false;              // Текущее состояние светодиода
+    // unsigned long currentMillis = millis();
+    // if (currentMillis - previousMillis >= interval)
+    // {
+    //     previousMillis = currentMillis;
+    //     ledState = !ledState;
+    //     digitalWrite(ledPin, ledState ? HIGH : LOW);
+    // }
 }
