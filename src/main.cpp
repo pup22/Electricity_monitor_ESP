@@ -69,6 +69,7 @@ static int lastBeatCode = 0;
 static bool lastBeatOk = false;
 static uint32_t beatsSent = 0;
 static uint32_t beatsFailed = 0;
+static volatile bool heartbeatNow = false; // отправить сигнал немедленно (после смены URL)
 
 // обновление
 static char updateStatus[112] = "Не проверялось";
@@ -400,6 +401,7 @@ h1{font-size:20px;margin:8px 0 16px;display:flex;align-items:center;gap:8px}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
 button,a.btn{display:block;box-sizing:border-box;margin-top:10px;width:100%;padding:10px;border:0;border-radius:8px;background:var(--btn);color:#fff;font:inherit;text-align:center;text-decoration:none;cursor:pointer}
 button:disabled{opacity:.5;cursor:default}
+input{width:100%;box-sizing:border-box;padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;margin-top:8px}
 </style></head><body><main>
 <h1><span class="dot" id="dot"></span><span id="conn">Подключение…</span></h1>
 
@@ -413,6 +415,9 @@ button:disabled{opacity:.5;cursor:default}
 <div class="row"><span>Последний сигнал</span><span id="hb">—</span></div>
 <div class="row"><span>Отправлено / ошибок</span><span id="cnt">—</span></div>
 <div class="row"><span>Google Script URL</span><span id="url">—</span></div>
+<input id="newurl" type="url" placeholder="https://script.google.com/macros/s/…/exec" maxlength="199" autocomplete="off">
+<button id="saveurl">Сохранить новый URL</button>
+<div id="urlmsg" style="margin-top:8px;color:var(--mut)"></div>
 </div>
 
 <div class="card"><h2>Сеть</h2>
@@ -458,6 +463,19 @@ async function load(){
  }catch(e){$('dot').style.background='var(--bad)';$('conn').textContent='Нет связи с устройством'}
 }
 $('btn').onclick=async()=>{$('btn').disabled=true;try{await fetch('/update',{method:'POST'})}catch(e){}setTimeout(load,1500)};
+$('saveurl').onclick=async()=>{
+ const v=$('newurl').value.trim(),m=$('urlmsg');
+ m.textContent='';
+ if(!v){m.textContent='Введите URL';return}
+ $('saveurl').disabled=true;
+ try{
+  const r=await fetch('/script',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'url='+encodeURIComponent(v)});
+  const d=await r.json();
+  if(d.ok){$('newurl').value='';m.textContent='Сохранено. Отправляю сигнал…';setTimeout(load,4000)}
+  else m.textContent='Ошибка: '+d.error;
+ }catch(e){m.textContent='Нет связи с устройством'}
+ $('saveurl').disabled=false;
+};
 load();setInterval(load,5000);
 </script></body></html>)HTML";
 
@@ -507,6 +525,40 @@ static void handleUpdate()
     server.send(202, "application/json", "{\"ok\":true}");
 }
 
+static void handleScriptUrl()
+{
+    String url = server.arg("url");
+    url.trim();
+
+    const char *err = nullptr;
+    if (url.length() == 0)
+        err = "URL пустой";
+    else if (url.length() >= URL_MAX)
+        err = "URL слишком длинный";
+    else if (!url.startsWith("https://script.google.com/"))
+        err = "URL должен начинаться с https://script.google.com/";
+
+    if (err)
+    {
+        server.send(400, "application/json", String("{\"ok\":false,\"error\":\"") + err + "\"}");
+        return;
+    }
+
+    char old[URL_MAX];
+    strlcpy(old, cfg.scriptUrl, sizeof(old));
+    strlcpy(cfg.scriptUrl, url.c_str(), sizeof(cfg.scriptUrl));
+    if (!configSave())
+    {
+        strlcpy(cfg.scriptUrl, old, sizeof(cfg.scriptUrl));
+        server.send(500, "application/json", "{\"ok\":false,\"error\":\"не удалось сохранить\"}");
+        return;
+    }
+
+    Serial.println("Script URL changed from web page");
+    heartbeatNow = true; // сразу проверяем новый адрес
+    server.send(200, "application/json", "{\"ok\":true}");
+}
+
 static void startWeb()
 {
     if (MDNS.begin(MDNS_HOST))
@@ -522,6 +574,7 @@ static void startWeb()
     server.on("/", HTTP_GET, handleRoot);
     server.on("/status", HTTP_GET, handleStatus);
     server.on("/update", HTTP_POST, handleUpdate);
+    server.on("/script", HTTP_POST, handleScriptUrl);
     wifiRegisterRoutes(server); // /wifi — смена сети без потери остальных настроек
     server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
     server.begin();
@@ -667,9 +720,10 @@ void loop()
         return;
     }
 
-    if (firstRun || ms - lastBeat >= HEARTBEAT_INTERVAL_MS)
+    if (firstRun || heartbeatNow || ms - lastBeat >= HEARTBEAT_INTERVAL_MS)
     {
         firstRun = false;
+        heartbeatNow = false;
         lastBeat = ms;
         sendHeartbeat();
     }
