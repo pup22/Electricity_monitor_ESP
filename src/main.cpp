@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <time.h>
 #include <stdarg.h>
-#include <WiFiManager.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 
@@ -9,23 +8,21 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <WebServer.h>
 #include <ESPmDNS.h>
 #include <HTTPUpdate.h>
 #include <esp_system.h>
-using WebServerT = WebServer;
 #define UPDATER httpUpdate
 #elif defined(ESP8266)
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266httpUpdate.h>
-using WebServerT = ESP8266WebServer;
 #define UPDATER ESPhttpUpdate
 #endif
 
+#include "config.h"    // cfg, имя точки доступа, mDNS-имя, таймауты Wi-Fi
+#include "wifisetup.h" // подключение, портал настройки, страница смены сети (+ WebServerT)
 #include "rstcount.h"
 #include "version.h"
 
@@ -38,22 +35,16 @@ static const uint8_t LED = 2;
 #endif
 static const bool LED_ACTIVE_LOW = true; // светодиод горит при низком уровне
 
-static const char *AP_NAME = "Power-Monitor-Setup";
-static const char *MDNS_HOST = "power-monitor"; // http://power-monitor.local
-static const char *CONFIG_PATH = "/config.json";
-static const size_t URL_MAX = 200;
-
 static const uint32_t HEARTBEAT_INTERVAL_MS = 60UL * 1000;   // период отправки
 static const uint32_t HTTP_TIMEOUT_MS = 15UL * 1000;
 static const uint32_t WIFI_LOST_REBOOT_MS = 2UL * 60 * 1000; // сколько ждать Wi-Fi до перезагрузки
-static const uint32_t PORTAL_TIMEOUT_S = 180;                // после этого портал закрывается и плата перезагружается
 static const uint32_t NTP_TIMEOUT_MS = 60UL * 1000;
 static const time_t MIN_VALID_EPOCH = 1700000000;
 
 // --- Обновление через GitHub Releases (репозиторий должен быть публичным) ---
-static const char *GITHUB_REPO = "pup22/Electricity_monitor_ESP";               // репозиторий
-static const bool AUTO_UPDATE_CHECK = true;                                     // периодически проверять релизы
-static const bool AUTO_INSTALL_UPDATES = true;                                  // true — ставить сразу, false — только сообщать
+static const char *GITHUB_REPO = "pup22/Electricity_monitor_ESP"; // репозиторий
+static const bool AUTO_UPDATE_CHECK = true;                        // периодически проверять релизы
+static const bool AUTO_INSTALL_UPDATES = true;                     // true — ставить сразу, false — только сообщать
 static const uint32_t UPDATE_FIRST_CHECK_MS = 2UL * 60 * 1000;
 static const uint32_t UPDATE_CHECK_INTERVAL_MS = 6UL * 60 * 60 * 1000;
 
@@ -68,8 +59,6 @@ static const uint32_t UPDATE_CHECK_INTERVAL_MS = 6UL * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------- состояние
 
-static char scriptUrl[URL_MAX] = "";
-static bool shouldSaveConfig = false;
 static uint32_t bootTime = 0; // Unix-время включения питания
 
 static WebServerT server(80);
@@ -101,9 +90,9 @@ static void setLed(bool on)
 // ------------------------------------------------- boot_time, переживающий soft-reset
 //
 // boot_time = момент включения питания. Если плата перезагрузилась программно
-// (WDT, потеря Wi-Fi, кнопка Reset, обновление прошивки), питание при этом не
-// пропадало, поэтому прежнее значение нужно сохранить — иначе скрипт Google
-// решит, что было отключение света. После реального пропадания питания
+// (WDT, потеря Wi-Fi, кнопка Reset, обновление прошивки, смена Wi-Fi), питание
+// при этом не пропадало, поэтому прежнее значение нужно сохранить — иначе скрипт
+// Google решит, что было отключение света. После реального пропадания питания
 // память RTC теряется.
 
 struct BootRecord
@@ -169,41 +158,6 @@ static time_t nowEpoch()
     return (t < MIN_VALID_EPOCH) ? 0 : t;
 }
 
-static void saveConfigCallback()
-{
-    Serial.println("WiFiManager: config save requested");
-    shouldSaveConfig = true;
-}
-
-static void loadConfig()
-{
-    File f = LittleFS.open(CONFIG_PATH, "r");
-    if (!f) return;
-
-    JsonDocument doc;
-    if (!deserializeJson(doc, f))
-    {
-        strlcpy(scriptUrl, doc["script_url"] | "", sizeof(scriptUrl));
-        Serial.printf("Loaded URL: %s\n", scriptUrl);
-    }
-    f.close();
-}
-
-static void saveConfig()
-{
-    File f = LittleFS.open(CONFIG_PATH, "w");
-    if (!f)
-    {
-        Serial.println("Error: cannot open config for writing");
-        return;
-    }
-    JsonDocument doc;
-    doc["script_url"] = scriptUrl;
-    serializeJson(doc, f);
-    f.close();
-    Serial.println("Config saved");
-}
-
 static void mountFS()
 {
     Serial.println("Mounting LittleFS...");
@@ -231,9 +185,9 @@ static void restartWithDelay(const char *reason)
 
 static bool sendHeartbeat()
 {
-    if (strlen(scriptUrl) < 10)
+    if (strlen(cfg.scriptUrl) < 10)
     {
-        Serial.println("Heartbeat skipped: Script URL is empty. Triple-click Reset to configure.");
+        Serial.println("Heartbeat skipped: Script URL is empty. Double-click Reset to configure.");
         return false;
     }
 
@@ -249,7 +203,7 @@ static bool sendHeartbeat()
     // уже обработан, поэтому редиректы не нужны.
     http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
-    if (!http.begin(client, scriptUrl))
+    if (!http.begin(client, cfg.scriptUrl))
     {
         Serial.println("Heartbeat: http.begin failed");
         return false;
@@ -433,6 +387,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 <style>
 :root{--bg:#f4f5f7;--card:#fff;--fg:#1c1e21;--mut:#6b7280;--ok:#16a34a;--bad:#dc2626;--bd:#e5e7eb;--btn:#2563eb}
 @media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#1a1d23;--fg:#e8eaed;--mut:#9aa0a6;--bd:#2b2f36;--btn:#3b82f6}}
+[hidden]{display:none!important}
 body{margin:0;font:15px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
 main{max-width:560px;margin:0 auto;padding:16px}
 h1{font-size:20px;margin:8px 0 16px;display:flex;align-items:center;gap:8px}
@@ -443,7 +398,7 @@ h1{font-size:20px;margin:8px 0 16px;display:flex;align-items:center;gap:8px}
 .row span:first-child{color:var(--mut);white-space:nowrap}
 .row span:last-child{text-align:right;word-break:break-word}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
-button{margin-top:10px;width:100%;padding:10px;border:0;border-radius:8px;background:var(--btn);color:#fff;font:inherit;cursor:pointer}
+button,a.btn{display:block;box-sizing:border-box;margin-top:10px;width:100%;padding:10px;border:0;border-radius:8px;background:var(--btn);color:#fff;font:inherit;text-align:center;text-decoration:none;cursor:pointer}
 button:disabled{opacity:.5;cursor:default}
 </style></head><body><main>
 <h1><span class="dot" id="dot"></span><span id="conn">Подключение…</span></h1>
@@ -465,6 +420,8 @@ button:disabled{opacity:.5;cursor:default}
 <div class="row"><span>Сигнал</span><span id="rssi">—</span></div>
 <div class="row"><span>IP-адрес</span><span id="ip">—</span></div>
 <div class="row"><span>Имя в сети</span><span id="host">—</span></div>
+<div class="row" id="wnrow" hidden><span>Примечание</span><span id="wn"></span></div>
+<a class="btn" href="/wifi">Сменить сеть Wi-Fi</a>
 </div>
 
 <div class="card"><h2>Прошивка</h2>
@@ -493,6 +450,7 @@ async function load(){
   $('url').textContent=d.url_set?'задан':'не задан';
   $('ssid').textContent=d.ssid;$('rssi').textContent=d.rssi+' дБм';
   $('ip').textContent=d.ip;$('host').textContent=d.host;
+  $('wnrow').hidden=!d.wifi_note;$('wn').textContent=d.wifi_note||'';
   $('ver').textContent=d.version;$('latest').textContent=d.latest||'—';
   $('chk').textContent=t(d.last_check);$('ust').textContent=d.update_status;
   $('heap').textContent=Math.round(d.heap/1024)+' КБ';
@@ -524,11 +482,12 @@ static void handleStatus()
     d["hb_ok"] = lastBeatOk;
     d["hb_sent"] = beatsSent;
     d["hb_failed"] = beatsFailed;
-    d["url_set"] = strlen(scriptUrl) >= 10;
+    d["url_set"] = strlen(cfg.scriptUrl) >= 10;
     d["ssid"] = WiFi.SSID();
     d["rssi"] = WiFi.RSSI();
     d["ip"] = WiFi.localIP().toString();
     d["host"] = String(MDNS_HOST) + ".local";
+    d["wifi_note"] = wifiNote;
     d["heap"] = ESP.getFreeHeap();
 
     String out;
@@ -563,6 +522,7 @@ static void startWeb()
     server.on("/", HTTP_GET, handleRoot);
     server.on("/status", HTTP_GET, handleStatus);
     server.on("/update", HTTP_POST, handleUpdate);
+    wifiRegisterRoutes(server); // /wifi — смена сети без потери остальных настроек
     server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
     server.begin();
     Serial.printf("Web: http://%s\n", WiFi.localIP().toString().c_str());
@@ -582,40 +542,39 @@ void setup()
 #endif
     Serial.printf("\n\n--- START (firmware %s) ---\n", FW_VERSION);
 
-    bool factoryReset = resetClick(); // окно ~1 с при загрузке
+    ResetAction action = resetClick(); // окно ~1 с при загрузке
     mountFS();
+    ConfigFile file = configLoad();
 
-    WiFiManager wm;
-    if (factoryReset)
+    if (action == RESET_FACTORY)
     {
-        Serial.println("Reset x3 detected: wiping settings");
-        WiFi.mode(WIFI_STA);
-        wm.resetSettings();
-        LittleFS.remove(CONFIG_PATH);
-        scriptUrl[0] = '\0';
-        shouldSaveConfig = true;
+        Serial.println("Reset x3: wiping ALL settings");
+        configWipe();
+        wifiForget();
+        file = ConfigFile{false, false};
     }
-    else
+    else if (action == RESET_WIFI)
     {
-        loadConfig();
+        Serial.println("Reset x2: WiFi setup portal (other settings are kept)");
     }
 
-    WiFiManagerParameter urlParam("script", "Google Script URL", scriptUrl, URL_MAX - 1);
-    wm.addParameter(&urlParam);
-    wm.setSaveConfigCallback(saveConfigCallback);
-    wm.setHostname(MDNS_HOST);
-    wm.setConnectTimeout(30);
-    // Без таймаута портал после отключения света висел бы вечно, если
-    // роутер загружается медленнее платы.
-    wm.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
+    // 1. Обычный запуск: подключаемся к сохранённой сети
+    bool connected = false;
+    if (action == RESET_NONE)
+    {
+        // файл от прошивки с WiFiManager: Wi-Fi лежит в памяти SDK — забираем его оттуда
+        if (file.exists && !file.hasSsid) connected = wifiMigrateLegacy();
+        if (!connected && (cfg.ssid[0] || cfg.pendSsid[0])) connected = wifiConnectBoot();
+    }
 
-    if (!wm.autoConnect(AP_NAME))
-        restartWithDelay("WiFi connect/portal timeout.");
+    // 2. Сети нет / не подключились / вызван портал: открываем точку доступа
+    if (!connected)
+    {
+        bool keepRetrying = (action == RESET_NONE) && cfg.ssid[0];
+        connected = wifiPortal(PORTAL_TIMEOUT_S, keepRetrying) || wifiConnectBoot();
+    }
+    if (!connected) restartWithDelay("WiFi connect/portal timeout.");
 
-    strlcpy(scriptUrl, urlParam.getValue(), sizeof(scriptUrl));
-    if (shouldSaveConfig) saveConfig();
-
-    Serial.println("WiFi connected");
     WiFi.setAutoReconnect(true);
 
     // NTP
@@ -687,6 +646,7 @@ void loop()
     MDNS.update();
 #endif
     server.handleClient();
+    wifiLoop();
 
     // Ручной запуск обновления с веб-страницы
     if (updateRequested)
@@ -715,18 +675,4 @@ void loop()
     }
 
     delay(5);
-
-
-    // // check GH
-    // const int ledPin = 2;              // GPIO2 (часто встроенный светодиод на модулях ESP-12)
-    // const unsigned long interval = 500; // Интервал переключения в миллисекундах (500 мс = 0.5 сек)
-    // static unsigned long previousMillis = 0;   // Время последнего переключения
-    // static bool ledState = false;              // Текущее состояние светодиода
-    // unsigned long currentMillis = millis();
-    // if (currentMillis - previousMillis >= interval)
-    // {
-    //     previousMillis = currentMillis;
-    //     ledState = !ledState;
-    //     digitalWrite(ledPin, ledState ? HIGH : LOW);
-    // }
 }

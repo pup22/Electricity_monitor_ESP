@@ -1,8 +1,9 @@
 #include <Arduino.h>
 #include "rstcount.h"
 
-static const uint32_t WAIT_TIME = 1000; // окно ожидания следующего клика, мс
-static const uint8_t RST_MAX = 3;       // сколько кликов Reset подряд сбрасывают настройки
+static const uint32_t WAIT_TIME = 1000; // окно ожидания следующего нажатия, мс
+static const uint8_t RST_WIFI = 2;      // запусков подряд для портала смены Wi-Fi
+static const uint8_t RST_FACTORY = 3;   // запусков подряд для полного сброса
 
 #if defined(ESP32)
 #include <Preferences.h>
@@ -45,18 +46,18 @@ static void storeCount(uint8_t value)
 }
 #endif
 
-bool resetClick()
+ResetAction resetClick()
 {
   uint8_t count = loadCount() + 1;
 
-  if (count >= RST_MAX)
+  if (count >= RST_FACTORY)
   {
     storeCount(0);
-    return true;
+    return RESET_FACTORY;
   }
 
   storeCount(count);
-  delay(WAIT_TIME); // если за это время Reset не нажали — счётчик обнуляется
+  delay(WAIT_TIME); // если за это время Reset нажали снова — счётчик вырастет
   storeCount(0);
-  return false;
+  return (count >= RST_WIFI) ? RESET_WIFI : RESET_NONE;
 }
