@@ -36,7 +36,13 @@ const MAX_FUTURE_SKEW_SEC = 300;          // boot_time «из будущего»
 // Токен лучше не хранить в коде: можно задать в Свойствах скрипта
 // (Настройки проекта -> Свойства скрипта -> TG_BOT_TOKEN), тогда он приоритетнее.
 const TG_BOT_TOKEN = "<ВАШ_ТОКЕН_БОТА>";
-const TG_CHAT_ID = "111111111";
+// Получатели уведомлений. Каждый должен хотя бы раз написать боту /start,
+// иначе Telegram не даст боту писать ему. ID группы — отрицательное число.
+const TG_CHAT_IDS = [
+  "111111111", // Имя 1
+  "222222222", // Имя 2
+  "333333333", // Имя 3
+];
 const TG_PARSE_MODE = "HTML";
 const SEND_TEST_MESSAGE_ON_SETUP = true;
 
@@ -247,30 +253,38 @@ function applyRowFormat_(sheet, row) {
 //                                  TELEGRAM
 // ============================================================================
 
-/** Отправляет сообщение в Telegram. Возвращает true при успехе. */
+/**
+ * Отправляет сообщение всем получателям из TG_CHAT_IDS.
+ * Сбой у одного получателя (например, он заблокировал бота) не мешает остальным.
+ * Возвращает true, если сообщение дошло хотя бы до одного.
+ */
 function sendTelegramMessage(text) {
   const token =
     PropertiesService.getScriptProperties().getProperty("TG_BOT_TOKEN") || TG_BOT_TOKEN;
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
-  try {
-    const response = UrlFetchApp.fetch(url, {
-      method: "post",
-      contentType: "application/json",
-      payload: JSON.stringify({
-        chat_id: TG_CHAT_ID,
-        text: text,
-        parse_mode: TG_PARSE_MODE,
-      }),
-      muteHttpExceptions: true,
-    });
-    const code = response.getResponseCode();
-    console.log(`Telegram Response (${code}): ${response.getContentText()}`);
-    return code === 200;
-  } catch (e) {
-    console.error("Ошибка при отправке в Telegram: " + e);
-    return false;
-  }
+  let delivered = 0;
+  TG_CHAT_IDS.forEach((chatId) => {
+    try {
+      const response = UrlFetchApp.fetch(url, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({
+          chat_id: chatId,
+          text: text,
+          parse_mode: TG_PARSE_MODE,
+        }),
+        muteHttpExceptions: true,
+      });
+      const code = response.getResponseCode();
+      console.log(`Telegram [${chatId}] (${code}): ${response.getContentText()}`);
+      if (code === 200) delivered++;
+    } catch (e) {
+      console.error(`Ошибка при отправке в Telegram [${chatId}]: ${e}`);
+    }
+  });
+
+  return delivered > 0;
 }
 
 // ============================================================================
